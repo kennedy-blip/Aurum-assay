@@ -127,9 +127,19 @@ jobs:
           # Without the NDK the JNI kernel is skipped; the app then uses the
           # TypeScript bridge (identical math), so the APK still builds.
           if [ "${{ steps.ndk.outputs.native }}" = "true" ]; then
-            ./gradlew assembleRelease --stacktrace --no-daemon
+            FLAGS=""
           else
-            ./gradlew assembleRelease --stacktrace --no-daemon -PaurumSkipNative=true
+            FLAGS="-PaurumSkipNative=true"
+          fi
+          set +e
+          ./gradlew assembleRelease --stacktrace --no-daemon $FLAGS > /tmp/gradle.log 2>&1
+          STATUS=$?
+          tail -n 60 /tmp/gradle.log
+          if [ $STATUS -ne 0 ]; then
+            # Surface the real cause as a workflow annotation (readable via the API).
+            TRIMMED=$(grep -m1 -A6 "^FAILURE:\|What went wrong\|error:" /tmp/gradle.log | tr '\n' ' ' | cut -c1-900)
+            echo "::error title=Gradle failed::$TRIMMED"
+            exit $STATUS
           fi
 
       - name: Bundle APK into public/releases for Vercel
