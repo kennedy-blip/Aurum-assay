@@ -139,8 +139,9 @@ jobs:
           if [ $STATUS -ne 0 ]; then
             # Publish the failure text as a check run: step logs are not always
             # downloadable, but the Checks API output always is.
-            SUMMARY=$(grep -A12 "What went wrong" /tmp/gradle.log | head -c 50000)
+            SUMMARY=$(grep -E -m3 -A15 "^\* What went wrong|^FAILURE:|Caused by:|error:|A problem occurred" /tmp/gradle.log | head -c 50000)
             if [ -z "$SUMMARY" ]; then SUMMARY=$(tail -c 50000 /tmp/gradle.log); fi
+            echo "--- captured diagnostic (${#SUMMARY} chars) ---"
             python3 - "$SUMMARY" <<'PY'
           import json, os, subprocess, sys
           summary = sys.argv[1]
