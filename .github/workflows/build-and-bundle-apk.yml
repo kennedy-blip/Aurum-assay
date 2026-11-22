@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# Serialise runs per branch so two builds never race to publish the APK.
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
