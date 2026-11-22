@@ -36,23 +36,24 @@ npm run build    # → dist/ (Vercel-ready)
 
 `capacitor.config.ts` (`com.aurumassay.forensics`) drives a complete Gradle project under `android/`:
 
-- `android/gradlew` + `gradle/wrapper` — Gradle 8.9 wrapper (committed, no local Gradle needed)
-- `android/app/build.gradle` — SDK 34, minSdk 24, `externalNativeBuild` → `src/main/cpp/CMakeLists.txt` (NDK 27, C++20)
+- `android/gradlew` — Gradle 8.9 wrapper (bootstrapped in CI; the jar is generated, so it is gitignored)
+- `android/app/build.gradle` — SDK 34, minSdk 24, `externalNativeBuild` → `src/main/cpp/CMakeLists.txt` (NDK 27, C++20), `-PaurumSkipNative=true` to build without the kernel
 - `android/app/src/main/java/com/aurumassay/forensics/` — `MainActivity` (Capacitor bridge) + `NativeAssay` (JNI to the metallurgy kernel)
 - `android/app/src/main/AndroidManifest.xml` — mic, camera, vibrate, location permissions matching the sensor matrix
 
-`.github/workflows/build-and-bundle-apk.yml` installs the Android SDK + NDK, generates (or injects) a release keystore, runs `./gradlew assembleRelease`, and **commits the signed APK back to the branch** so `public/releases/aurumassay-release.apk` — the file behind the in-app **One-Tap Download Center** and its QR code — is always the real binary. The workflow fails loudly if Gradle emits no APK, and its publish commit carries `[skip ci]` so it cannot retrigger itself.
+`.github/workflows/build-and-bundle-apk.yml` installs the Android SDK + NDK, generates (or injects) a release keystore, runs `./gradlew assembleRelease`, and **commits the signed APK back to the branch**, so `public/releases/aurumassay-release.apk` — the file behind the in-app **One-Tap Download Center** and its QR code — is always the real binary (see `SHA256SUMS.txt`; the modal shows the live hash). Runs are serialised per branch, the publish commit carries `[skip ci]`, and the job fails loudly if Gradle emits no APK.
 
 Build locally:
 
 ```bash
 npm install && npm run build
 npx cap sync android
-cd android && ./gradlew assembleRelease
+cd android && gradle wrapper --gradle-version 8.9   # once, to create the wrapper
+./gradlew assembleRelease
 # → android/app/build/outputs/apk/release/app-release.apk
 ```
 
-Until the first CI run lands, the repo carries a source-tree fallback APK (a ZIP carrying the full `dist/` bundle under `assets/www/`) so the download link never 404s — it is not an installable Android package. Run the workflow (or push to `main`) to replace it with a signed, installable build.
+Until a CI build has published its artifact, the repository copy is a **source-tree fallback** — a ZIP carrying the full `dist/` bundle under `assets/www/` — so the download link never 404s. It is not installable. Trigger the workflow to replace it.
 
 ## Roles & themes
 
