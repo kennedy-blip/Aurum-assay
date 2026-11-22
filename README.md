@@ -34,7 +34,25 @@ npm run build    # → dist/ (Vercel-ready)
 
 ## Android APK
 
-`capacitor.config.ts` (`com.aurumassay.forensics`) + `.github/workflows/build-and-bundle-apk.yml` build the SolidJS bundle, sync Capacitor, compile the NDK C++ kernel via Gradle, and bundle `public/releases/aurumassay-release.apk` for the in-app **One-Tap Download Center** (with QR code). A pre-bundled placeholder artifact ships in the repo so the download never 404s.
+`capacitor.config.ts` (`com.aurumassay.forensics`) drives a complete Gradle project under `android/`:
+
+- `android/gradlew` + `gradle/wrapper` — Gradle 8.9 wrapper (committed, no local Gradle needed)
+- `android/app/build.gradle` — SDK 34, minSdk 24, `externalNativeBuild` → `src/main/cpp/CMakeLists.txt` (NDK 27, C++20)
+- `android/app/src/main/java/com/aurumassay/forensics/` — `MainActivity` (Capacitor bridge) + `NativeAssay` (JNI to the metallurgy kernel)
+- `android/app/src/main/AndroidManifest.xml` — mic, camera, vibrate, location permissions matching the sensor matrix
+
+`.github/workflows/build-and-bundle-apk.yml` installs the Android SDK + NDK, generates (or injects) a release keystore, runs `./gradlew assembleRelease`, and **commits the signed APK back to the branch** so `public/releases/aurumassay-release.apk` — the file behind the in-app **One-Tap Download Center** and its QR code — is always the real binary. The workflow fails loudly if Gradle emits no APK, and its publish commit carries `[skip ci]` so it cannot retrigger itself.
+
+Build locally:
+
+```bash
+npm install && npm run build
+npx cap sync android
+cd android && ./gradlew assembleRelease
+# → android/app/build/outputs/apk/release/app-release.apk
+```
+
+Until the first CI run lands, the repo carries a source-tree fallback APK (a ZIP carrying the full `dist/` bundle under `assets/www/`) so the download link never 404s — it is not an installable Android package. Run the workflow (or push to `main`) to replace it with a signed, installable build.
 
 ## Roles & themes
 

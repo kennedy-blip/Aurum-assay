@@ -1,0 +1,88 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace "com.aurumassay.forensics"
+    compileSdk rootProject.ext.compileSdkVersion
+
+    defaultConfig {
+        applicationId "com.aurumassay.forensics"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 10
+        versionName "10.0.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+            // Don't compress bundled WASM shaders/kernels
+            noCompress "wasm"
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+
+    // ---- NDK: compile the C++20 JNI metallurgy/horology kernel ----
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+    ndkVersion "27.0.12077973"
+
+    signingConfigs {
+        release {
+            // CI generates a keystore (or injects real secrets) and exports these
+            // env vars. Applied only when the store file actually exists, so a
+            // release build never fails on a missing keystore.
+            def ksPath = System.getenv("AURUM_KEYSTORE_PATH")
+            if (ksPath != null && file(ksPath).exists()) {
+                storeFile file(ksPath)
+                storePassword System.getenv("AURUM_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("AURUM_KEY_ALIAS")
+                keyPassword System.getenv("AURUM_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (signingConfigs.release.storeFile != null) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            applicationIdSuffix ".debug"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/LICENSE*', 'META-INF/NOTICE*']
+        }
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation "androidx.appcompat:appcompat:1.7.0"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:1.2.0"
+    implementation "androidx.core:core-splashscreen:$rootProject.ext.coreSplashScreenVersion"
+    implementation "com.google.android.material:material:1.12.0"
+    implementation "androidx.webkit:webkit:1.12.1"
+    implementation project(':capacitor-android')
+}
+
+// Gradle configuration fails with a clear message if `npx cap sync android` has
+// not yet materialised the Capacitor runtime module.
+if (!file("../node_modules/@capacitor/android/capacitor").exists()) {
+    logger.warn("Capacitor runtime module missing — run `npm install && npx cap sync android`.")
+}

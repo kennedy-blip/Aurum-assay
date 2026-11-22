@@ -5,11 +5,17 @@ on:
     branches: [main, "arena/**"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -22,7 +28,7 @@ jobs:
       - name: Build SolidJS + WASM bundle
         run: npm run build
 
-      # ---- Optional native toolchains (graceful fallback to pre-compiled WASM bridge) ----
+      # ---- Optional native toolchains (graceful fallback to the TS bridge) ----
       - name: Install Zig 0.13
         uses: goto-bus-stop/setup-zig@v2
         with:
@@ -31,8 +37,12 @@ jobs:
 
       - name: Compile Zig DSP kernel (if available)
         run: |
+          mkdir -p public/wasm
           if command -v zig >/dev/null 2>&1; then
-            zig build-exe zig-dsp/src/simd_timegrapher.zig -target wasm32-freestanding -O ReleaseFast -femit-bin=public/wasm/simd_timegrapher.wasm || echo "Zig build skipped — using TS bridge fallback"
+            zig build-exe zig-dsp/src/simd_timegrapher.zig \
+              -target wasm32-freestanding -O ReleaseFast \
+              -femit-bin=public/wasm/simd_timegrapher.wasm \
+              || echo "Zig build skipped - using TS bridge fallback"
           fi
         continue-on-error: true
 
@@ -44,11 +54,13 @@ jobs:
 
       - name: Compile C++20 metallurgy kernel to WASM (if available)
         run: |
+          mkdir -p public/wasm
           if command -v emcc >/dev/null 2>&1; then
             emcc cpp-kernel/metallurgy_horology.cpp -std=c++20 -O3 \
               -s EXPORTED_FUNCTIONS='["_aurum_plate_modes","_aurum_specific_gravity","_aurum_karat"]' \
               -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap"]' \
-              -o public/wasm/metallurgy_horology.js || echo "emcc build skipped — using TS bridge fallback"
+              -o public/wasm/metallurgy_horology.js \
+              || echo "emcc build skipped - using TS bridge fallback"
           fi
         continue-on-error: true
 
@@ -59,31 +71,89 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK + build tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "ndk;27.0.12077973" "platforms;android-34" "build-tools;34.0.0"
+
       - name: Sync Capacitor Android project
         run: npx cap sync android
+
+      - name: Generate release keystore
+        run: |
+          if [ -n "${{ secrets.AURUM_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.AURUM_KEYSTORE_BASE64 }}" | base64 -d > aurum-release.jks
+            echo "AURUM_KEYSTORE_PATH=$PWD/aurum-release.jks" >> $GITHUB_ENV
+            echo "AURUM_KEYSTORE_PASSWORD=${{ secrets.AURUM_KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "AURUM_KEY_ALIAS=${{ secrets.AURUM_KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "AURUM_KEY_PASSWORD=${{ secrets.AURUM_KEY_PASSWORD }}" >> $GITHUB_ENV
+            echo "Using keystore from repository secrets."
+          else
+            keytool -genkeypair -v -keystore "$PWD/aurum-release.jks" \
+              -alias aurum -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass aurumassay -keypass aurumassay \
+              -dname "CN=AURUM-ASSAY, OU=Forensic Metallurgy, O=AurumAssay, L=Nairobi, C=KE"
+            echo "AURUM_KEYSTORE_PATH=$PWD/aurum-release.jks" >> $GITHUB_ENV
+            echo "AURUM_KEYSTORE_PASSWORD=aurumassay" >> $GITHUB_ENV
+            echo "AURUM_KEY_ALIAS=aurum" >> $GITHUB_ENV
+            echo "AURUM_KEY_PASSWORD=aurumassay" >> $GITHUB_ENV
+            echo "Generated ephemeral keystore (set AURUM_KEYSTORE_BASE64 for stable signatures)."
+          fi
 
       - name: Build release APK (Gradle + NDK C++ kernel)
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleRelease --stacktrace
-        continue-on-error: true
+          ./gradlew assembleRelease --stacktrace --no-daemon
 
       - name: Bundle APK into public/releases for Vercel
         run: |
           mkdir -p public/releases
-          APK=$(find android -name "*.apk" -path "*release*" | head -n 1 || true)
-          if [ -n "$APK" ]; then
-            cp "$APK" public/releases/aurumassay-release.apk
-            sha256sum public/releases/aurumassay-release.apk > public/releases/SHA256SUMS.txt
-          else
-            echo "APK build unavailable in CI — keeping pre-bundled placeholder artifact."
+          APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "::error::No release APK produced - Gradle build did not emit an artifact."
+            exit 1
           fi
-          ls -la public/releases/
+          cp "$APK" public/releases/aurumassay-release.apk
+          cd public/releases
+          sha256sum aurumassay-release.apk > SHA256SUMS.txt
+          echo "### APK built" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -l aurumassay-release.apk >> $GITHUB_STEP_SUMMARY
+          cat SHA256SUMS.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: aurumassay-release-apk
-          path: public/releases/aurumassay-release.apk
-          if-no-files-found: warn
+          path: |
+            public/releases/aurumassay-release.apk
+            public/releases/SHA256SUMS.txt
+          if-no-files-found: error
+
+      # Publish the freshly built APK back to the branch so the One-Tap Download
+      # button serves the real binary, not the source-tree fallback.
+      - name: Commit built APK back to branch
+        run: |
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "Not a push event - skipping publish."
+            exit 0
+          fi
+          # Loop guard: this job's own publish commit must not retrigger a build.
+          if git log -1 --pretty=%s | grep -q "\[skip ci\]"; then
+            echo "Previous commit was an APK publish - skipping."
+            exit 0
+          fi
+          git config user.name "aurum-apk-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add public/releases/aurumassay-release.apk public/releases/SHA256SUMS.txt
+          if git diff --cached --quiet; then
+            echo "APK unchanged - nothing to publish."
+            exit 0
+          fi
+          git commit -m "ci: publish signed release APK [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}

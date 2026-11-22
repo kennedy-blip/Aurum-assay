@@ -207,10 +207,17 @@ export function PrivilegeDrawer(props: { open: boolean; close: () => void; role:
 
 export function ApkModal(props: { open: boolean; close: () => void }) {
   const [qr, setQr] = createSignal("");
+  const [sha, setSha] = createSignal("…");
   const apkUrl = () => `${window.location.origin}/releases/aurumassay-release.apk`;
 
   createEffect(() => {
-    if (props.open) QRCode.toDataURL(apkUrl(), { width: 220, margin: 1, color: { dark: "#0a0a0a", light: "#ffffff" } }).then(setQr).catch(() => setQr(""));
+    if (!props.open) return;
+    QRCode.toDataURL(apkUrl(), { width: 220, margin: 1, color: { dark: "#0a0a0a", light: "#ffffff" } }).then(setQr).catch(() => setQr(""));
+    // Show the checksum of the exact binary being served.
+    fetch("/releases/SHA256SUMS.txt")
+      .then((r) => (r.ok ? r.text() : ""))
+      .then((t) => setSha(t.trim().split(/\s+/)[0] || "unavailable"))
+      .catch(() => setSha("unavailable"));
   });
 
   return (
@@ -228,7 +235,7 @@ export function ApkModal(props: { open: boolean; close: () => void }) {
             </div>
             <div class="flex-1 text-center sm:text-left">
               <p class="text-sm">Scan with your Android phone to install instantly — then assay coins, watches & jewelry anywhere, 100% offline.</p>
-              <a href="/releases/aurumassay-release.apk" download="AurumAssay-Forensics-v1.0.0.apk" class="btn-gold mt-3 inline-block px-5 py-3 text-sm">
+              <a href="/releases/aurumassay-release.apk" download="AurumAssay-Forensics-v10.0.0.apk" class="btn-gold mt-3 inline-block px-5 py-3 text-sm">
                 ⬇ One-Tap Direct .APK Download
               </a>
               <p class="text-dim mt-2 font-mono2 text-[10px] break-all">{apkUrl()}</p>
@@ -236,10 +243,10 @@ export function ApkModal(props: { open: boolean; close: () => void }) {
           </div>
 
           <div class="mt-5 grid grid-cols-2 gap-2 text-xs">
-            <div class="rounded-xl border border-white/10 p-3"><div class="text-dim">Version</div><div class="font-mono2">v1.0.0-arm64</div></div>
+            <div class="rounded-xl border border-white/10 p-3"><div class="text-dim">Version</div><div class="font-mono2">v10.0.0 · arm64-v8a</div></div>
             <div class="rounded-xl border border-white/10 p-3"><div class="text-dim">Stack</div><div class="font-mono2">SolidJS + C++20 NDK + Zig + SQL + GLSL</div></div>
             <div class="rounded-xl border border-white/10 p-3"><div class="text-dim">Mode</div><div class="font-mono2">100% Offline Estate-Sale Ready</div></div>
-            <div class="rounded-xl border border-white/10 p-3"><div class="text-dim">Checksum</div><div class="font-mono2">SHA-256 · see /releases/SHA256SUMS.txt</div></div>
+            <div class="rounded-xl border border-white/10 p-3"><div class="text-dim">SHA-256</div><div class="font-mono2 break-all">{sha()}</div></div>
           </div>
 
           <ol class="text-dim mt-4 list-decimal space-y-1 pl-5 text-xs">

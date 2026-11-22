@@ -1,0 +1,10 @@
+ext {
+    minSdkVersion = 24
+    compileSdkVersion = 34
+    targetSdkVersion = 34
+    androidGradlePlugin = '8.7.2'
+    coreSplashScreenVersion = '1.0.1'
+
+    // Capacitor runtime version — must match @capacitor/android in package.json
+    capacitorVersion = '6.2.0'
+}
