@@ -1,1 +1,1 @@
-646f63f2e491e7fd2bff13d31977b1fdba29470fff9cd17577fe1cbe008b3474  aurumassay-release.apk
+3cca902f4c66cd7eff5d4dfed3de601f6d6a00916532fbb300b803d39f24d64c  aurumassay-release.apk
