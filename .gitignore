@@ -17,3 +17,4 @@ android/app/src/main/res/xml/config.xml
 *.keystore
 
 gradle-failure.log
+android/gradle/wrapper/gradle-wrapper.jar
