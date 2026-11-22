@@ -5,11 +5,22 @@ on:
     branches: [main, "arena/**"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+# Serialise runs per branch so two builds never race to publish the APK.
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -22,7 +33,7 @@ jobs:
       - name: Build SolidJS + WASM bundle
         run: npm run build
 
-      # ---- Optional native toolchains (graceful fallback to pre-compiled WASM bridge) ----
+      # ---- Optional native toolchains (graceful fallback to the TS bridge) ----
       - name: Install Zig 0.13
         uses: goto-bus-stop/setup-zig@v2
         with:
@@ -31,8 +42,12 @@ jobs:
 
       - name: Compile Zig DSP kernel (if available)
         run: |
+          mkdir -p public/wasm
           if command -v zig >/dev/null 2>&1; then
-            zig build-exe zig-dsp/src/simd_timegrapher.zig -target wasm32-freestanding -O ReleaseFast -femit-bin=public/wasm/simd_timegrapher.wasm || echo "Zig build skipped — using TS bridge fallback"
+            zig build-exe zig-dsp/src/simd_timegrapher.zig \
+              -target wasm32-freestanding -O ReleaseFast \
+              -femit-bin=public/wasm/simd_timegrapher.wasm \
+              || echo "Zig build skipped - using TS bridge fallback"
           fi
         continue-on-error: true
 
@@ -44,11 +59,13 @@ jobs:
 
       - name: Compile C++20 metallurgy kernel to WASM (if available)
         run: |
+          mkdir -p public/wasm
           if command -v emcc >/dev/null 2>&1; then
             emcc cpp-kernel/metallurgy_horology.cpp -std=c++20 -O3 \
               -s EXPORTED_FUNCTIONS='["_aurum_plate_modes","_aurum_specific_gravity","_aurum_karat"]' \
               -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap"]' \
-              -o public/wasm/metallurgy_horology.js || echo "emcc build skipped — using TS bridge fallback"
+              -o public/wasm/metallurgy_horology.js \
+              || echo "emcc build skipped - using TS bridge fallback"
           fi
         continue-on-error: true
 
@@ -59,31 +76,148 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Set up Android SDK
+        run: |
+          # GitHub's ubuntu-latest image already provides the Android SDK.
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
+          echo "$SDK/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "SDK root: $SDK"
+
+      - name: Install NDK + build tools
+        id: ndk
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          if "$SDK/cmdline-tools/latest/bin/sdkmanager" \
+               "ndk;27.0.12077973" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"; then
+            echo "native=true" >> $GITHUB_OUTPUT
+          else
+            echo "native=false" >> $GITHUB_OUTPUT
+            echo "::warning::NDK install failed - building the WebView path without the native kernel."
+          fi
+
       - name: Sync Capacitor Android project
         run: npx cap sync android
+
+      # A wrapper jar cannot be committed reliably (it is generated, not source),
+      # so bootstrap a verified wrapper with the Gradle distribution itself.
+      - name: Bootstrap Gradle wrapper
+        run: |
+          cd android
+          rm -f gradle/wrapper/gradle-wrapper.jar
+          if ! ./gradlew --version > /dev/null 2>&1; then
+            echo "Bootstrapping wrapper via a temporary Gradle distribution..."
+            curl -sSL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.9-bin.zip
+            unzip -q /tmp/gradle.zip -d /tmp
+            /tmp/gradle-8.9/bin/gradle wrapper --gradle-version 8.9 --distribution-type all
+          fi
+          ./gradlew --version
+
+      - name: Generate release keystore
+        run: |
+          if [ -n "${{ secrets.AURUM_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.AURUM_KEYSTORE_BASE64 }}" | base64 -d > aurum-release.jks
+            echo "AURUM_KEYSTORE_PATH=$PWD/aurum-release.jks" >> $GITHUB_ENV
+            echo "AURUM_KEYSTORE_PASSWORD=${{ secrets.AURUM_KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "AURUM_KEY_ALIAS=${{ secrets.AURUM_KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "AURUM_KEY_PASSWORD=${{ secrets.AURUM_KEY_PASSWORD }}" >> $GITHUB_ENV
+            echo "Using keystore from repository secrets."
+          else
+            keytool -genkeypair -v -keystore "$PWD/aurum-release.jks" \
+              -alias aurum -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass aurumassay -keypass aurumassay \
+              -dname "CN=AURUM-ASSAY, OU=Forensic Metallurgy, O=AurumAssay, L=Nairobi, C=KE"
+            echo "AURUM_KEYSTORE_PATH=$PWD/aurum-release.jks" >> $GITHUB_ENV
+            echo "AURUM_KEYSTORE_PASSWORD=aurumassay" >> $GITHUB_ENV
+            echo "AURUM_KEY_ALIAS=aurum" >> $GITHUB_ENV
+            echo "AURUM_KEY_PASSWORD=aurumassay" >> $GITHUB_ENV
+            echo "Generated ephemeral keystore (set AURUM_KEYSTORE_BASE64 for a stable signature)."
+          fi
 
       - name: Build release APK (Gradle + NDK C++ kernel)
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleRelease --stacktrace
-        continue-on-error: true
+          # Without the NDK the JNI kernel is skipped; the app then uses the
+          # TypeScript bridge (identical math), so the APK still builds.
+          if [ "${{ steps.ndk.outputs.native }}" = "true" ]; then FLAGS=""; else FLAGS="-PaurumSkipNative=true"; fi
+          set +e
+          ./gradlew assembleRelease --stacktrace --no-daemon $FLAGS > /tmp/gradle.log 2>&1
+          STATUS=$?
+          tail -n 40 /tmp/gradle.log
+          if [ $STATUS -ne 0 ]; then
+            {
+              echo "## Gradle failure"; echo; echo '```'; cat /tmp/gradle.log; echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cp /tmp/gradle.log ../gradle-failure.log
+            cd ..
+            git config user.name "aurum-apk-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add -f gradle-failure.log
+            git commit -m "ci: capture gradle failure log [skip ci]" || true
+            git push origin HEAD:${{ github.ref_name }} || true
+            exit $STATUS
+          fi
+          rm -f ../gradle-failure.log
 
       - name: Bundle APK into public/releases for Vercel
         run: |
           mkdir -p public/releases
-          APK=$(find android -name "*.apk" -path "*release*" | head -n 1 || true)
-          if [ -n "$APK" ]; then
-            cp "$APK" public/releases/aurumassay-release.apk
-            sha256sum public/releases/aurumassay-release.apk > public/releases/SHA256SUMS.txt
-          else
-            echo "APK build unavailable in CI — keeping pre-bundled placeholder artifact."
+          APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "::error::No release APK produced - Gradle build did not emit an artifact."
+            exit 1
           fi
-          ls -la public/releases/
+          cp "$APK" public/releases/aurumassay-release.apk
+          cd public/releases
+          sha256sum aurumassay-release.apk > SHA256SUMS.txt
+          echo "### APK built" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -l aurumassay-release.apk >> $GITHUB_STEP_SUMMARY
+          cat SHA256SUMS.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: aurumassay-release-apk
-          path: public/releases/aurumassay-release.apk
-          if-no-files-found: warn
+          path: |
+            public/releases/aurumassay-release.apk
+            public/releases/SHA256SUMS.txt
+          if-no-files-found: error
+
+      # Publish the freshly built APK back to the branch so the One-Tap Download
+      # button serves the real binary.
+      - name: Commit built APK back to branch
+        run: |
+          if [ "${{ github.event_name }}" != "push" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "Unsupported event - skipping publish."
+            exit 0
+          fi
+          if git log -1 --pretty=%s | grep -q "\[skip ci\]"; then
+            echo "Previous commit was a publish - skipping."
+            exit 0
+          fi
+          git config user.name "aurum-apk-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -f public/releases/aurumassay-release.apk public/releases/SHA256SUMS.txt
+          if git diff --cached --quiet; then
+            echo "APK unchanged - nothing to publish."
+            exit 0
+          fi
+          git commit -m "ci: publish signed release APK [skip ci]"
+          # Retry with rebase: another push can land while the build runs.
+          for attempt in 1 2 3 4 5; do
+            if git push origin HEAD:${{ github.ref_name }}; then
+              echo "Published APK on attempt $attempt."
+              exit 0
+            fi
+            echo "Push rejected - rebasing onto origin/${{ github.ref_name }} (attempt $attempt)."
+            git fetch origin ${{ github.ref_name }}
+            git rebase "origin/${{ github.ref_name }}" || { git rebase --abort; exit 1; }
+            sleep $((attempt * 5))
+          done
+          echo "::error::Could not publish the APK after 5 attempts."
+          exit 1
